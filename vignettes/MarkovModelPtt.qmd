@@ -1,0 +1,258 @@
+---
+title: "Markov model Ptt"
+author: Benedikt Schamberger
+date: today
+format: html
+editor: visual
+engine: knitr
+---
+
+```{r}
+library(markovlv)
+library(ggplot2)
+options(scipen = 999, digits = 2)
+```
+
+# Initial basic model
+
+We define the model
+
+```{r}
+m <- Markov1$new(n_states = 3)
+m$set_discount_factor(0.02)
+
+start <- 40
+stop  <- 30
+
+p <- matrix(
+  c(
+    0.80, 0.10, 0.10,
+    0.70, 0.20, 0.10,
+    0.15, 0.70, 0.15
+  ),
+  ncol  = 3, byrow = TRUE
+)
+m$set_transition_matrix(p)
+
+pre <- c(-0.10, 0.30, 0.00)
+m$set_prenumerando(pre)
+
+post <- matrix(
+  c(
+    0, 0, 10,
+    -4, 0,  0,
+    0, 0,  0
+  ),
+  ncol  = 3,
+  byrow = TRUE
+)
+m$set_postnumerando(post)
+```
+
+Model outputs
+
+```{r}
+m$get_reserve(start, stop)
+
+m$plot_reserve(start, stop)
+m$plot_cashflow(start, stop)
+```
+
+A more complex example with a parameterised mortality function
+
+```{r}
+mu <- function(x) exp(-9.13275 + 0.0809 * x + 0.000011 * x^2)
+```
+
+We use this function to define a more complex Markov model
+
+```{r}
+m <- Markov1$new(2)
+m$set_discount_factor(0.035)
+
+mp <- m$clone()
+
+start <- 65
+stop  <- 30
+
+p <- array(0, dim = c(2, 2, 120))
+p[1, 2, stop:(start - 1)] <- mu(stop:(start - 1)) # Python starts indexing from 0
+p[1, 1, stop:(start - 1)] <- 1 - p[1, 2, stop:(start - 1)]
+p[2, 2, stop:(start - 1)] <- 1
+
+m$set_transition_matrix(p)
+mp$set_transition_matrix(p)
+
+post_m <- array(0, dim = c(2, 2, 120))
+post_m[, , stop:(start - 1)] <- matrix(
+  c(0, 200000,
+    0,      0),
+  ncol  = 2,
+  byrow = TRUE
+)
+post_m[1, 1, (start - 1)] <- 100000
+
+m$set_postnumerando(post_m)
+m$set_prenumerando(c(0, 0))
+
+post_mp <- matrix(
+  c(0, 0,
+    0, 0),
+  ncol  = 2,
+  byrow = TRUE
+)
+
+mp$set_postnumerando(post_mp)
+mp$set_prenumerando(c(1, 0))
+
+pp <- m$get_reserve(start, stop)$state_1[1] / 
+  mp$get_reserve(start, stop)$state_1[1]
+```
+
+The premium is `r pp`
+
+```{r}
+modified_prenumerando <- m$prenumerando
+modified_prenumerando[stop:(start - 1), 1] <- -pp
+m$set_prenumerando(modified_prenumerando)
+
+m$get_reserve(start, stop)
+m$plot_reserve(start, stop)
+```
+
+Impact of different interest rates
+
+```{r}
+my_interest_rates <- c(0.00, 0.02, 0.04, 0.08, 0.20)
+reserves <- vector("list", length = length(my_interest_rates))
+
+for (i in seq_along(my_interest_rates)) {
+  rate <- my_interest_rates[i]
+  m$set_discount_factor(rate)
+  print(
+    paste(
+      "Interest rate", 100 * rate, "-->", 
+      format(m$get_reserve(start, stop)$state_1[1], nsmall = 2, digits = 2)
+    )
+  )
+  reserves[[i]] <- cbind(
+    setNames(m$get_reserve(start, stop)[, c("time", "state_1")], c("time", "reserve")),
+    rate = paste0(format(rate * 100, format = "2.f%"), "%")
+  )
+}
+
+data_plot <- do.call(rbind, reserves)
+
+ggplot(data_plot) + 
+  geom_line(aes(x = time, y = reserve, colour = rate))
+```
+
+Assume the policy has been written in 1955 and the regulator requires you today, in 2022, to set a reserving interest rate of 1%.
+What are the additional funds required?
+
+```{r}
+original <- 0.035
+required <- 0.010
+age <- 2020 - 1995 + 1
+```
+
+Current age `r age`
+
+```{r}
+m$set_discount_factor(original)
+vx_original <- m$get_reserve(start, stop)$state_1[age]
+
+m$set_discount_factor(required)
+vx_required <- m$get_reserve(start, stop)$state_1[age]
+```
+Reserves: Original `r vx_original`, required (current) `r vx_required`, add reserve `r -(vx_original - vx_required)`
+
+# Two persons covered
+
+```{r}
+start <- 110
+stop  <- 65
+d_xy  <- 3
+
+n_states <- 4
+discount_rate <- 0.035
+
+m1 <- Markov1$new(n_states)
+m1$set_discount_factor(discount_rate)
+
+m2 <- Markov1$new(n_states)
+m2$set_discount_factor(discount_rate)
+
+m3 <- Markov1$new(n_states)
+m3$set_discount_factor(discount_rate)
+
+m1$set_prenumerando(c(1, 0, 0, 0))
+m2$set_prenumerando(c(0, 1, 0, 0))
+m3$set_prenumerando(c(0, 0, 1, 0))
+
+policy_duration <- stop:(start - 1)
+qx <- mu(policy_duration)
+qy <- mu(policy_duration + d_xy)
+
+p <- array(0, dim = c(n_states, n_states, 120))
+p[1, 1, policy_duration] <- (1 - qx) * (1 - qy)
+p[1, 2, policy_duration] <- qx * (1 - qy)
+p[1, 3, policy_duration] <- (1 - qx) * qy
+p[1, 4, policy_duration] <- qx * qy
+p[2, 2, policy_duration] <- (1 - qy)
+p[2, 4, policy_duration] <- qy
+p[3, 3, policy_duration] <- (1 - qx)
+p[3, 4, policy_duration] <- qx
+p[4, 4, policy_duration] <- 1
+
+m1$set_transition_matrix(p)
+m2$set_transition_matrix(p)
+m3$set_transition_matrix(p)
+
+post <- matrix(0, nrow = n_states, ncol = n_states)
+m1$set_postnumerando(post)
+m2$set_postnumerando(post)
+m3$set_postnumerando(post)
+```
+
+```{r}
+reserve_state_1 <- rbind(
+  cbind(m1$get_reserve(start, stop)[, c("time", "state_1")], model = "1"),
+  cbind(m2$get_reserve(start, stop)[, c("time", "state_1")], model = "2"),
+  cbind(m3$get_reserve(start, stop)[, c("time", "state_1")], model = "3")
+)
+
+ggplot(reserve_state_1) + 
+  geom_line(aes(x = time, y = state_1, colour = model))
+```
+
+```{r}
+names <- c("time", "reserve")
+reserve_state_j <- rbind(
+  cbind(setNames(m1$get_reserve(start, stop)[, c("time", "state_1")], names), model = "1"),
+  cbind(setNames(m2$get_reserve(start, stop)[, c("time", "state_2")], names), model = "2"),
+  cbind(setNames(m3$get_reserve(start, stop)[, c("time", "state_3")], names), model = "3")
+)
+
+ggplot(reserve_state_j) + 
+  geom_line(aes(x = time, y = reserve, colour = model))
+```
+
+```{r}
+names <- c("time", "cashflow")
+cashflow_state_1 <- rbind(
+  cbind(setNames(m1$get_cashflow(start, stop)[, c("time", "state_1")], names), model = "1"),
+  cbind(setNames(m2$get_cashflow(start, stop)[, c("time", "state_1")], names), model = "2"),
+  cbind(setNames(m3$get_cashflow(start, stop)[, c("time", "state_1")], names), model = "3")
+)
+
+ggplot(cashflow_state_1) + 
+  geom_line(aes(x = time, y = cashflow, colour = model)) + 
+  geom_col(aes(x = time, y = cashflow, fill = model), position = "dodge")
+```
+
+```{r}
+m1$plot_cashflow(start, stop)
+m2$plot_cashflow(start, stop)
+m3$plot_cashflow(start, stop)
+```
